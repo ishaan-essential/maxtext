@@ -4,22 +4,18 @@ Entrypoint for lm_eval harness
 import os
 import time
 import pathlib
-import functools
 from typing import Sequence, List
-from types import SimpleNamespace
 import numpy as np
-from generate_helper import generate
-from decode import init_decode, validate_config
-from flax.linen import partitioning as nn_partitioning
-from jax.sharding import PartitionSpec as P
 import jax
 import lm_eval
+import pyconfig
 from absl import app
 from lm_eval.logging_utils import WandbLogger
 from lm_eval.api.model import LM
-from loglikelihood_helper import get_dataloader, model_ll
-import tokenizer
-import entrypoint_helper
+import batch_maxengine as maxengine
+from jetstream.engine import token_utils
+
+
 
 
 """ Contains the MaxTextWrapperLMEvalBatched class, which acts a wrapper
@@ -31,43 +27,22 @@ class MaxTextWrapperLMEvalBatched(LM):
   The class is a wrapper for a MaxText model for lm_eval tasks.
   The class is used to evaluate the model on lm_eval tasks.
   """
-  def __init__(self, config, model = None,
-               model_vars = None, rng = None, state_mesh_annotations = None):
+  def __init__(self, config):
     """
     The function initializes the model, model variables, tokenizer and random
     number generator for lm_eval tasks
     """
     super().__init__()
-
-    self.batch_sz = int(config.eval_per_device_batch_size)
-
+    self.config = config
     #Note: max_prefill_predict_length should be greater than largest possible
     #prompt fed to the model in the eval
     self.max_len = config.max_prefill_predict_length
-    self.tokenizer = tokenizer.load_tokenizer(tokenizer_path=config.tokenizer_path,
-                                          add_bos=True,
-                                          add_eos=True)
-
-    if model is not None and\
-       model_vars is not None and\
-       rng is not None and\
-       state_mesh_annotations is not None:
-      self.model = model
-      self.model_vars = model_vars
-      self.rng = rng
-      self.state_mesh_annotations = state_mesh_annotations
-    else:
-      self.model, self.model_vars, self.tokenizer, self.rng, state_mesh_annotations = init_decode(config)
-    self.state_mesh_shardings = jax.tree_map(
-        lambda p: jax.sharding.NamedSharding(self.model.mesh, p), state_mesh_annotations)
-    self.data_sharding = jax.tree_map(
-      lambda p: jax.sharding.NamedSharding(self.model.mesh, p), P(*self.model.config.data_sharding))
-
-  def update_state(self, model_vars):
-    """ used in training loop to set latest checkpoint
-        model_vars is a pytree (dict of all layers : weights)
-    """
-    self.model_vars = model_vars
+    engine = maxengine.MaxEngine(config)
+    self.params = engine.load_params()
+    metadata = engine.get_tokenizer()
+    self.vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
+    self.tokenizer = self.vocab.tokenizer
+    self.engine = engine
 
   def loglikelihood(self, requests: List) -> list[tuple[float, bool]]:
     """
@@ -81,37 +56,8 @@ class MaxTextWrapperLMEvalBatched(LM):
     :return: list[tuple[float, bool]]
         - the list of loglikelihoods and is_greedy for each request
     """
-    outputs = []
-
-    import ipdb; ipdb.set_trace()
-
-    # this will contain the entire dataset
-    num_requests = len(requests)
-
-    # Pad up requests to be an integral multiple of global batch size
-    if num_requests%self.batch_sz != 0:
-      add_requests = self.batch_sz - num_requests % self.batch_sz
-      requests += requests[:add_requests]
-
-    # convert requests: List into a sharded dataloader that divides up the dataset
-    # between the various devices
-    eval_iter = get_dataloader(self.model, self.tokenizer, requests, self.batch_sz, self.max_len)
-    partial_model_ll = functools.partial(model_ll, model=self.model)
-    p_model_ll = jax.jit(
-    partial_model_ll,
-    in_shardings=(self.state_mesh_shardings, self.data_sharding, None),
-    out_shardings=(self.data_sharding,self.data_sharding),
-    )
-
-    for batch in eval_iter:
-      with self.model.mesh, nn_partitioning.axis_rules(self.model.config.logical_axis_rules):
-        ll, is_greedy = p_model_ll(self.model_vars, batch, self.rng)
-        ll = jax.device_get(jax.experimental.multihost_utils.process_allgather(ll))
-        is_greedy = jax.device_get(jax.experimental.multihost_utils.process_allgather(is_greedy))
-        # output is will identical across all host processes
-        outputs += [(ll[j].item(),is_greedy[j].item()) for j in range(len(ll))]
-
-    return outputs[:num_requests]
+    pass
+    
 
   def loglikelihood_rolling(self, requests : List) -> list[float]:
     """
@@ -127,11 +73,7 @@ class MaxTextWrapperLMEvalBatched(LM):
     :return: list[tuple[float]]
         - the list of loglikelihoods for each request
     """
-
-    #Pass an empty string as the prompt in each request to self.loglikelihood
-    ll_requests = [SimpleNamespace(args=['',req.args[0]]) for req in requests]
-    ll_outputs = self.loglikelihood(ll_requests)
-    return [ll for ll,_ in ll_outputs]
+    pass
 
   def generate_until(self, requests) -> list[str]:
     """
@@ -143,28 +85,112 @@ class MaxTextWrapperLMEvalBatched(LM):
     :return: list[str]
         - the list of completions for each request
     """
+    num_requests = len(requests)
+    batch_sz = int(self.config.per_device_batch_size * jax.device_count())
+    num_batches = int(np.ceil(len(requests)/batch_sz))
+    if num_requests%batch_sz != 0:
+      add_requests = batch_sz - num_requests % batch_sz
+      requests += requests[:add_requests]
+    
+    prompts = [req.args[0] for req in requests]
+    until = [req.args[1]['until'] for req in requests]
+    all_tokens,all_true_lengths,sampled_tokens_list,outputs = [],[],[],[]
 
-    outputs = []
-    num_batches = int(np.ceil(len(requests)/self.batch_sz))
-    self.tokenizer = tokenizer.load_tokenizer(
-      tokenizer_path=self.model.config.tokenizer_path,
-      add_bos=True,
-      add_eos=False)
+    token_start_time = time.time()
+    for t in prompts:
+      tokens, true_length = token_utils.tokenize_and_pad(t, self.vocab, is_bos=True,
+                                                      prefill_lengths=[self.config.max_prefill_predict_length])
+      all_tokens.append(tokens)
+      all_true_lengths.append(true_length)
+    token_end_time = time.time()
+    print(f"Time taken for tokenization: {token_end_time - token_start_time:.2f}s")
 
     for i in range(num_batches):
+      print(f"Batch {i+1}/{num_batches}")
       start_time = time.time()
-      batch_reqs = requests[i*self.batch_sz: (i+1)*self.batch_sz]
-
-      temperature = np.array([req.args[1]['temperature'] for req in batch_reqs])
-      assert np.all(temperature == 0), "temperature is non-zero"
-      prompts = [req.args[0] for req in batch_reqs]
-      until = [req.args[1]['until'] for req in batch_reqs]
-      outputs += generate(self.model, {'params':self.model_vars.params},
-                          self.tokenizer, self.rng, prompts, until=until)
+      batch_tokens = all_tokens[i*batch_sz:(i+1)*batch_sz]
+      true_lengths = all_true_lengths[i*batch_sz:(i+1)*batch_sz]
+      sampled_tokens_list.append(self.generate_helper(batch_tokens,true_lengths))
       end_time = time.time()
-      print(f'count: {i},  total: {num_batches}, time: {end_time - start_time}')
-      import ipdb; ipdb.set_trace()
-    return outputs
+      print(f"Time taken for batch: {end_time - start_time:.2f}s")
+
+    
+    get_device_time = time.time()
+    all_results = []
+    for sampled_token_batch in sampled_tokens_list:
+      sampled_tokens_array = []
+      for seq_idx in range(len(sampled_token_batch)):
+        sampled_tokens_array.append(jax.device_get(sampled_token_batch[seq_idx].data)[:,0:1])
+      sampled_tokens_array = np.concatenate(sampled_tokens_array,axis=1)
+      all_results.append(sampled_tokens_array)
+    
+    all_results = np.concatenate(all_results,axis=0)
+    
+    end_device_time = time.time()
+    print(f"Time taken for get_device: {end_device_time - get_device_time:.2f}s")
+    
+    detoken_start_time = time.time()
+    for res_idx in range(len(all_results)):
+        
+        output = self.tokenizer.detokenize(all_results[res_idx].tolist())
+        output = stop_sequence(output,until[res_idx])
+        outputs.append(prompts[res_idx] + output)
+    detoken_end_time = time.time()
+    print(f"Time taken for detokenize: {detoken_end_time - detoken_start_time:.2f}s")
+   
+    return outputs[:num_requests]
+
+  def generate_helper(self,batch_tokens,true_lengths):
+    start_time = time.time()
+    prefill_result = self.engine.prefill(
+    params=self.params, padded_tokens=batch_tokens, true_length=true_lengths
+    )
+    slot=0
+    decode_state = self.engine.init_decode_state()
+    decode_state = self.engine.insert(
+        prefill_result, decode_state, slot=slot
+    )
+
+    prefill_end_time = time.time()
+    print(f"Time taken for prefill: {prefill_end_time - start_time:.2f}s")
+    steps = range(self.config.max_prefill_predict_length, self.config.max_target_length)
+    sampled_tokens_list = []
+    count = 0
+    for _ in steps:
+      count += 1
+      step_start_time = time.time()
+      decode_state, sampled_tokens = self.engine.generate(
+        self.params, decode_state
+      )
+      sampled_tokens_list.append(sampled_tokens)
+      step_end_time = time.time()
+      #print(f"Time taken for one step: {step_end_time - step_start_time:.2f}s count: {count}")
+    
+    return sampled_tokens_list
+
+
+def stop_sequence(text, until):
+  """
+  Function to clip the generated sequence at the first occurence of a stop string
+
+  :param text: str
+    - the generated sequence
+  :param until: str
+    - the stop string
+
+  :return: str
+    - the generated sequence clipped at the first occurence of the stop string
+  """
+  #TODO: Optimize by checking for "stop strings" in the decoding loop directly
+  #- currently we generate a sequence of max_token_length, and then remove all
+  # tokens after a stop string is found. Note that since we are batching,
+  # the decoding loop must only stop generating for entries in the batch that
+  # have hit a "stop string" but not others.
+  for stop_str in until:
+    if stop_str in text:
+      text = text.split(stop_str)[0]
+
+  return text
 
 
 def lm_evaluate_helper(lm_wrapper,tasks,task_manager,num_fewshots):
@@ -186,7 +212,7 @@ def lm_evaluate_helper(lm_wrapper,tasks,task_manager,num_fewshots):
       if task_obj is None:
         continue
     task_obj.set_config(key="num_fewshot", value=num_fewshot)
-  lm_eval_results = lm_eval.evaluate(lm=lm_wrapper,task_dict=task_dict,limit=80)
+  lm_eval_results = lm_eval.evaluate(lm=lm_wrapper,task_dict=task_dict)
   lm_eval_metrics = ['acc,none','acc_norm,none']
   for task_name in lm_eval_results['results']:
     for metric_name in lm_eval_metrics:
@@ -202,15 +228,15 @@ def run_lm_eval(argv : Sequence[str]) -> None:
   """
   Entrypoint for lm_eval_harness
   """
-  config = entrypoint_helper.read_cmd_line_get_config(argv)
-  validate_config(config)
+  pyconfig.initialize(argv)
+  config = pyconfig.config
 
   start_time = time.time()
 
   lm_obj = MaxTextWrapperLMEvalBatched(config)
   task_manager = lm_eval.tasks.TaskManager(
     include_path=os.path.join(str(pathlib.Path(__file__).parent.parent),'lm_eval_harness_tasks'))
-  results,_ = lm_evaluate_helper(lm_obj,['random_task'],task_manager,config.eval_n_shots.split())
+  results,_ = lm_evaluate_helper(lm_obj,['gsm8k'],task_manager,['0'])
 
   metrics = results['results']
   print(f'Results: {metrics}')
@@ -223,4 +249,6 @@ def run_lm_eval(argv : Sequence[str]) -> None:
   wandb_logger.log_eval_samples(results["samples"])  # if log_samples
 
 if __name__ == "__main__":
+  jax.config.update('jax_default_prng_impl', 'unsafe_rbg')
+  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   app.run(run_lm_eval)

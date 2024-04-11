@@ -32,7 +32,7 @@ def main(config):
   engine = maxengine.MaxEngine(config)
   params = engine.load_params()
 
-  text = ['Roger Federer is ','Cleopatra is ', 'The Mona Lisa is ','The Great Wall of China is ']*5
+  text = ['Roger Federer is ']
   metadata = engine.get_tokenizer()
   vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
   tokenizer = vocab.tokenizer
@@ -68,11 +68,10 @@ def main(config):
     end_time = time.time()
     print(f"Time taken for one step: {end_time - start_time:.2f}s count: {count}")
 
-  slot = 3
-  results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
-  import ipdb; ipdb.set_trace()
-  output = tokenizer.detokenize(results)
-  print(f"Input `{text}` -> `{output}`")
+  for text_idx,prompt in enumerate(text):
+    results = [sampled_tokens.get_result_at_slot(text_idx).tokens.item() for sampled_tokens in sampled_tokens_list]
+    output = tokenizer.detokenize(results)
+    print(f"Input `{prompt}` -> `{output}`")
 
   if config.autoregressive_decode_assert != "":
     assert output==config.autoregressive_decode_assert, \

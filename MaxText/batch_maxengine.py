@@ -242,12 +242,12 @@ class MaxEngine(engine_api.Engine):
       if path_key == 'cache_ar_segment_id':
         ### goal: zero this out in case there is existing data
         s = list(full_cache.shape)
-        s[batch_idx] = 1
+        #s[batch_idx] = 1
         zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
         return jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
       elif path_key == 'cache_prefill_segment_id':
         s = list(full_cache.shape)
-        s[batch_idx] = 1
+        #s[batch_idx] = 1
         zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
         ## zero out in case prefill cache is too small to cover
         full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)

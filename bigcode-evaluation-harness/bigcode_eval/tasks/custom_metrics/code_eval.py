@@ -19,7 +19,7 @@ described in the paper "Evaluating Large Language Models Trained on Code"
 import itertools
 import os
 from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 import numpy as np
 
@@ -126,7 +126,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE."""
 
-def compute_code_eval(predictions, references, k=[1, 10, 100], num_workers=4, timeout=3.0):
+def compute_code_eval(predictions, references, k=[1, 10, 100], num_workers=32, timeout=3.0):
     """Returns the scores"""
 
     if os.getenv("HF_ALLOW_CODE_EVAL", 0) != "1":
@@ -134,8 +134,7 @@ def compute_code_eval(predictions, references, k=[1, 10, 100], num_workers=4, ti
 
     if os.name == "nt":
         raise NotImplementedError("This metric is currently not supported on Windows.")
-
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
         futures = []
         completion_id = Counter()
         n_samples = 0

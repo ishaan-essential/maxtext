@@ -236,7 +236,7 @@ def run_lm_eval(argv : Sequence[str]) -> None:
   lm_obj = MaxTextWrapperLMEvalBatched(config)
   task_manager = lm_eval.tasks.TaskManager(
     include_path=os.path.join(str(pathlib.Path(__file__).parent.parent),'lm_eval_harness_tasks'))
-  results,_ = lm_evaluate_helper(lm_obj,['gsm8k'],task_manager,['0'])
+  results,_ = lm_evaluate_helper(lm_obj,['gsm8k'],task_manager,['5'])
 
   metrics = results['results']
   print(f'Results: {metrics}')

@@ -93,7 +93,6 @@ class Evaluator:
             raise ValueError(_WARNING)
 
         generations, references = self.generate_text(task_name, intermediate_generations=intermediate_generations)
-
         if self.accelerator.is_main_process:
             if not self.args.load_generations_path:
                 save_generations_path = f"{os.path.splitext(self.args.save_generations_path)[0]}_{task_name}.json"

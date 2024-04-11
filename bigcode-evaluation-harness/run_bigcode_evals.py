@@ -37,7 +37,7 @@ class MultiChoice:
             yield choice
 
 
-def get_arguments(eai_wrapper,tasks,n_samples,huggingface_dummy_model='codeparrot/codeparrot-small',modeltype='causal',peft_model=None,revision=None,use_auth_token=False,
+def get_arguments(eai_wrapper=None,tasks="",n_samples=1,huggingface_dummy_model='codeparrot/codeparrot-small',modeltype='causal',peft_model=None,revision=None,use_auth_token=False,
                 trust_remote_code=False, instruction_tokens=None,batch_size=1,max_length_generation=512,precision='fp32',load_in_8bit=False,load_in_4bit=False,left_padding=False,
                 limit=None,limit_start=0,save_every_k_tasks=-1,postprocess=True,allow_code_execution=True,generation_only=False,load_generations_path=None,load_data_path=None,
                 metric_output_path='evaluation_results.json',save_generations=True,load_generations_intermediate_paths=None,save_generations_path='generations.json',
@@ -105,15 +105,15 @@ def get_gpus_max_memory(max_memory, num_gpus):
     return max_memory
 
 
-def evaluate_code(eai_wrapper,tasks,n_samples):
-    args = get_arguments(eai_wrapper,tasks,n_samples)
+def evaluate_code(*varargs, **kwargs):
+    args = get_arguments(*varargs, **kwargs)
     transformers.logging.set_verbosity_error()
     datasets.logging.set_verbosity_error()
 
     if args.tasks is None:
         task_names = ALL_TASKS
     else:
-        task_names = pattern_match(args.tasks.split(","), ALL_TASKS)
+        task_names = pattern_match(args.tasks.split(" "), ALL_TASKS)
 
     accelerator = Accelerator()
     if accelerator.is_main_process:

@@ -70,6 +70,7 @@ def main(config):
 
   for text_idx,prompt in enumerate(text):
     results = [sampled_tokens.get_result_at_slot(text_idx).tokens.item() for sampled_tokens in sampled_tokens_list]
+    import ipdb; ipdb.set_trace()
     output = tokenizer.detokenize(results)
     print(f"Input `{prompt}` -> `{output}`")
 

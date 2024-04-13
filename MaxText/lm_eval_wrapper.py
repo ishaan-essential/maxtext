@@ -7,14 +7,17 @@ import pathlib
 from typing import Sequence, List
 import numpy as np
 import jax
+from flax.linen import partitioning as nn_partitioning
 import lm_eval
 import pyconfig
+from types import SimpleNamespace
 from absl import app
 from lm_eval.logging_utils import WandbLogger
 from lm_eval.api.model import LM
 import batch_maxengine as maxengine
+from loglikelihood_helper import get_dataloader, model_ll
 from jetstream.engine import token_utils
-
+import tokenizer
 
 
 
@@ -42,7 +45,13 @@ class MaxTextWrapperLMEvalBatched(LM):
     metadata = engine.get_tokenizer()
     self.vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
     self.tokenizer = self.vocab.tokenizer
+    self.sp_tokenizer = tokenizer.load_tokenizer(tokenizer_path=config.tokenizer_path,
+                                          add_bos=True,
+                                          add_eos=True)
     self.engine = engine
+    self.model = self.engine.model
+    self.rng = self.engine.rng
+    self.batch_sz = int(self.config.per_device_batch_size * jax.device_count())
 
   def loglikelihood(self, requests: List) -> list[tuple[float, bool]]:
     """
@@ -56,7 +65,28 @@ class MaxTextWrapperLMEvalBatched(LM):
     :return: list[tuple[float, bool]]
         - the list of loglikelihoods and is_greedy for each request
     """
-    pass
+    outputs = []
+
+    # this will contain the entire dataset
+    num_requests = len(requests)
+
+    # Pad up requests to be an integral multiple of global batch size
+    if num_requests%self.batch_sz != 0:
+      add_requests = self.batch_sz - num_requests % self.batch_sz
+      requests += requests[:add_requests]
+
+    # convert requests: List into a sharded dataloader that divides up the dataset
+    # between the various devices
+    eval_iter = get_dataloader(self.model, self.sp_tokenizer, requests, self.batch_sz, self.max_len)
+    for batch in eval_iter:
+      with self.model.mesh, nn_partitioning.axis_rules(self.model.config.logical_axis_rules):
+        ll, is_greedy = model_ll(self.params, batch, self.rng,self.model)
+        ll = jax.device_get(jax.experimental.multihost_utils.process_allgather(ll))
+        is_greedy = jax.device_get(jax.experimental.multihost_utils.process_allgather(is_greedy))
+        # output is will identical across all host processes
+        outputs += [(ll[j].item(),is_greedy[j].item()) for j in range(len(ll))]
+
+    return outputs[:num_requests]
     
 
   def loglikelihood_rolling(self, requests : List) -> list[float]:
@@ -73,7 +103,10 @@ class MaxTextWrapperLMEvalBatched(LM):
     :return: list[tuple[float]]
         - the list of loglikelihoods for each request
     """
-    pass
+    #Pass an empty string as the prompt in each request to self.loglikelihood
+    ll_requests = [SimpleNamespace(args=['',req.args[0]]) for req in requests]
+    ll_outputs = self.loglikelihood(ll_requests)
+    return [ll for ll,_ in ll_outputs]
 
   def generate_until(self, requests) -> list[str]:
     """
@@ -131,7 +164,6 @@ class MaxTextWrapperLMEvalBatched(LM):
     
     detoken_start_time = time.time()
     for res_idx in range(len(all_results)):
-        
         output = self.tokenizer.detokenize(all_results[res_idx].tolist())
         output = stop_sequence(output,until[res_idx])
         outputs.append(prompts[res_idx] + output)
@@ -142,8 +174,11 @@ class MaxTextWrapperLMEvalBatched(LM):
 
   def generate_helper(self,batch_tokens,true_lengths):
     start_time = time.time()
+
+    input_tokens, positions, segment_ids, true_length = self.engine.get_data(batch_tokens, true_lengths)
+
     prefill_result = self.engine.prefill(
-    params=self.params, padded_tokens=batch_tokens, true_length=true_lengths
+    params=self.params, input_tokens=input_tokens, positions=positions, segment_ids=segment_ids, true_length=true_length
     )
     slot=0
     decode_state = self.engine.init_decode_state()
@@ -236,7 +271,7 @@ def run_lm_eval(argv : Sequence[str]) -> None:
   lm_obj = MaxTextWrapperLMEvalBatched(config)
   task_manager = lm_eval.tasks.TaskManager(
     include_path=os.path.join(str(pathlib.Path(__file__).parent.parent),'lm_eval_harness_tasks'))
-  results,_ = lm_evaluate_helper(lm_obj,['gsm8k'],task_manager,['5'])
+  results,_ = lm_evaluate_helper(lm_obj,['hellaswag'],task_manager,['0'])
 
   metrics = results['results']
   print(f'Results: {metrics}')

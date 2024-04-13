@@ -15,7 +15,7 @@
 ''' Implementation of Engine API for MaxText '''
 import functools
 from typing import Any, Optional, Tuple, List
-
+import numpy as np
 import flax
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
@@ -33,6 +33,7 @@ from jetstream.engine import tokenizer_pb2
 
 import max_utils
 import inference_utils
+from multihost_dataloading import _form_global_array
 
 
 Prefix = Any
@@ -120,14 +121,33 @@ class MaxEngine(engine_api.Engine):
       self.model.quant.quant_mode = quantizations.get_quant_mode('serve')
       return params
 
+  def get_data(self,padded_tokens,true_length):
+    input_tokens = np.array(padded_tokens) # [BATCH, SEQUENCE]
+    batch_size = input_tokens.shape[0]
+    positions = np.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0).repeat(batch_size, axis=0)
+
+    zero_to_n = np.expand_dims(jnp.arange(0, input_tokens.shape[1]),0).repeat(batch_size, axis=0)
+    true_length = np.expand_dims(jnp.array(true_length),1)
+    ones_to_keep = zero_to_n < true_length
+    segment_ids = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+
+    input_tokens = _form_global_array(None,input_tokens, self._mesh)
+    positions = _form_global_array(None,positions, self._mesh)
+    segment_ids = _form_global_array(None,segment_ids, self._mesh)
+    return input_tokens, positions, segment_ids, true_length
+
+
+
   @functools.partial(jax.jit, static_argnums=(0,))
   def prefill(
       self,
       *,
       params: Params,
       existing_prefix: Optional[jax.Array] = None,
-      padded_tokens: jax.Array,
-      true_length: List[int],
+      input_tokens: jax.Array,
+      positions: jax.Array,
+      segment_ids: jax.Array,
+      true_length: jax.Array,
   ) -> Prefix:
     """Computes a kv-cache for a new generate request.
 
@@ -144,14 +164,11 @@ class MaxEngine(engine_api.Engine):
     if existing_prefix:
       raise ValueError("We don't know what to do with existing_prefix")
 
-    input_tokens = jnp.array(padded_tokens) # [BATCH, SEQUENCE]
+    #input_tokens = jax.lax.with_sharding_constraint(input_tokens, self.replicated_sharding)
+    #positions = jax.lax.with_sharding_constraint(positions, self.replicated_sharding)
+    #segment_ids = jax.lax.with_sharding_constraint(segment_ids, self.replicated_sharding)
     batch_size = input_tokens.shape[0]
-    positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0).repeat(batch_size, axis=0)
-
-    zero_to_n = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]),0).repeat(batch_size, axis=0)
-    true_length = jnp.expand_dims(jnp.array(true_length),1)
-    ones_to_keep = zero_to_n < true_length
-    segment_ids = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+    
 
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       flat_logits, new_vars = self.model.apply(
@@ -164,7 +181,7 @@ class MaxEngine(engine_api.Engine):
         rngs={'params': self.rng},
         mutable=["cache"]
       )
-    
+
     next_pos = jnp.full((batch_size,1), true_length, dtype = jnp.int32)
     generated_tokens = jnp.zeros((batch_size,1), dtype = jnp.int32)
     def slice_single_item(logits, true_length):
@@ -172,6 +189,7 @@ class MaxEngine(engine_api.Engine):
 
     batch_slice = jax.vmap(slice_single_item, in_axes=(0,0), out_axes=0)
     selected_logits = batch_slice(flat_logits, true_length)
+
     selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
     return {"logits" : selected_logits, "cache" : new_vars['cache'],
             "next_pos" : next_pos, "generated_tokens" : generated_tokens}
@@ -187,7 +205,7 @@ class MaxEngine(engine_api.Engine):
                                         topk=self.config.decode_sampling_top_k,
                                         nucleus_topp=self.config.decode_sampling_nucleus_p,
                                         temperature=self.config.decode_sampling_temperature)
-
+    
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       out_logits, new_vars = self.model.apply(
         params | { 'cache': decode_state['cache']},

@@ -1,1 +1,0 @@
-{"columns": ["Tasks", "Version", "Filter", "num_fewshot", "Metric", "Value", "Stderr"], "data": [["hellaswag", 1.0, "none", 0, "acc", "0.5264887472615017", "0.0050"], ["hellaswag", 1.0, "none", 0, "acc_norm", "0.6957777335192192", "0.0046"]]}

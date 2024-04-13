@@ -1,1 +1,0 @@
-{"columns": ["Tasks", "Version", "Filter", "num_fewshot", "Metric", "Value", "Stderr"], "data": [["gsm8k", 3.0, "strict-match", 5, "exact_match", "0.009855951478392721", "0.0027"], ["gsm8k", 3.0, "flexible-extract", 5, "exact_match", "0.177407126611069", "0.0105"]]}

@@ -66,7 +66,7 @@ def main(config):
     
     sampled_tokens_list.append(sampled_tokens)
     end_time = time.time()
-    print(f"Time taken for one step: {end_time - start_time:.2f}s count: {count}")
+    print(f"Time taken for one step: {end_time - start_time}s count: {count}")
 
   for text_idx,prompt in enumerate(text):
     results = [sampled_tokens.get_result_at_slot(text_idx).tokens.item() for sampled_tokens in sampled_tokens_list]

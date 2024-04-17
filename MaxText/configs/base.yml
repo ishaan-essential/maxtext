@@ -144,8 +144,8 @@ dcn_fsdp_transpose_parallelism: 1
 dcn_sequence_parallelism: 1  # never recommended
 dcn_tensor_parallelism: 1 # never recommeneded
 dcn_autoregressive_parallelism: 1 # never recommended
-ici_data_parallelism: 1
-ici_fsdp_parallelism: -1 # recommended ICI axis to be auto-sharded
+ici_data_parallelism: -1
+ici_fsdp_parallelism: 1 # recommended ICI axis to be auto-sharded
 ici_fsdp_transpose_parallelism: 1
 ici_sequence_parallelism: 1
 ici_tensor_parallelism: 1

@@ -164,7 +164,7 @@ class MaxTextWrapperLMEvalBatched(LM):
       )
       sampled_tokens_list.append(sampled_tokens)
       step_end_time = time.time()
-      #print(f"Time taken for one step: {step_end_time - step_start_time:.2f}s count: {count}")
+      print(f"Time taken for one step: {step_end_time - step_start_time}s count: {count}")
     
     return sampled_tokens_list
 

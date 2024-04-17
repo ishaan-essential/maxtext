@@ -48,11 +48,15 @@ def main(config):
 
   steps = range(config.max_prefill_predict_length, config.max_target_length)
   sampled_tokens_list = []
+  import time
   for _ in steps:
+    start = time.time()
     decode_state, sampled_tokens = engine.generate(
       params, decode_state
     )
     sampled_tokens_list.append(sampled_tokens)
+    end = time.time()
+    print(f"Time taken for one step: {end-start}")
 
   results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
   output = tokenizer.detokenize(results)

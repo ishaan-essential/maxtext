@@ -86,6 +86,9 @@ class MaxEngine(engine_api.Engine):
     self.kv_cache_annotations = max_utils.get_kv_cache_annotations(self.model, self.config, self.rng, self._mesh)
     self.kv_cache_shardings = jax.tree_map(lambda x : jax.sharding.NamedSharding(self._mesh, x), self.kv_cache_annotations)
 
+    import ipdb; ipdb.set_trace()
+
+    
     if not self.model.quant:
       self.abstract_params = jax.tree_map(lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding),
                                           state.params)
@@ -115,6 +118,8 @@ class MaxEngine(engine_api.Engine):
 
       self.abstract_params = jax.tree_map(lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding),
                                           params)
+      
+      
 
       self.model.quant.quant_mode = quantizations.get_quant_mode('serve')
       return params
@@ -145,6 +150,8 @@ class MaxEngine(engine_api.Engine):
 
     input_tokens = jnp.expand_dims(padded_tokens, 0) # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
+
+    
 
     zero_to_n = jnp.arange(0, padded_tokens.shape[0])
     ones_to_keep = zero_to_n < true_length
@@ -261,6 +268,8 @@ class MaxEngine(engine_api.Engine):
     inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state['next_pos'], unboxed_prefix['next_pos'], slot, 0)
     inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(decode_state['generated_tokens'],
                                                                     unboxed_prefix['generated_tokens'], slot, 0)
+
+    import ipdb; ipdb.set_trace()
 
     inserted_logits = jax.lax.with_sharding_constraint(inserted_logits, self.replicated_sharding)
     inserted_generated_tokens = jax.lax.with_sharding_constraint(inserted_generated_tokens, self.replicated_sharding)
